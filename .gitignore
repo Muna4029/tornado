@@ -15,3 +15,8 @@ MANIFEST
 # Used in demo apps
 secrets.cfg
 .mypy_cache/
+# Shell redirection artifacts
+=[0-9]*
+>[0-9]*
+*.tmp
+*.log

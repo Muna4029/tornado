@@ -1,5 +1,6 @@
 import pycares  # type: ignore
 import socket
+import weakref
 
 from tornado.concurrent import Future
 from tornado import gen
@@ -35,8 +36,15 @@ class CaresResolver(Resolver):
 
     def initialize(self) -> None:
         self.io_loop = IOLoop.current()
-        self.channel = pycares.Channel(sock_state_cb=self._sock_state_cb)
         self.fds = {}  # type: Dict[int, int]
+        # Use a weakref to avoid circular reference through the callback
+        weak_self = weakref.ref(self)
+        def sock_state_cb(fd: int, readable: bool, writable: bool) -> None:
+            self = weak_self()
+            if self is None:
+                return
+            self._sock_state_cb(fd, readable, writable)
+        self.channel = pycares.Channel(sock_state_cb=sock_state_cb)
 
     def _sock_state_cb(self, fd: int, readable: bool, writable: bool) -> None:
         state = (IOLoop.READ if readable else 0) | (IOLoop.WRITE if writable else 0)
@@ -66,10 +74,10 @@ class CaresResolver(Resolver):
         if is_valid_ip(host):
             addresses = [host]
         else:
-            # gethostbyname doesn't take callback as a kwarg
             fut = Future()  # type: Future[Tuple[Any, Any]]
-            self.channel.gethostbyname(
-                host, family, lambda result, error: fut.set_result((result, error))
+            self.channel.getaddrinfo(
+                host, port, family=family,
+                callback=lambda result, error: fut.set_result((result, error))
             )
             result, error = yield fut
             if error:
@@ -77,7 +85,19 @@ class CaresResolver(Resolver):
                     "C-Ares returned error %s: %s while resolving %s"
                     % (error, pycares.errno.strerror(error), host)
                 )
-            addresses = result.addresses
+            addrinfo = []
+            for node in result.nodes:
+                if family != socket.AF_UNSPEC and family != node.family:
+                    raise OSError(
+                        "Requested socket family %d but got %d" % (family, node.family)
+                    )
+                # node.addr is a tuple like (b'127.0.0.1', 80) for IPv4
+                # or (b'::1', 80, 0, 0) for IPv6
+                address = node.addr[0]
+                if isinstance(address, bytes):
+                    address = address.decode()
+                addrinfo.append((node.family, (address, port)))
+            return addrinfo
         addrinfo = []
         for address in addresses:
             if "." in address:
