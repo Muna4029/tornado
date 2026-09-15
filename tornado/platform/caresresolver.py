@@ -7,9 +7,10 @@ from tornado.ioloop import IOLoop
 from tornado.netutil import Resolver, is_valid_ip
 
 import typing
+from typing import Any
 
 if typing.TYPE_CHECKING:
-    from typing import Generator, Any, List, Tuple, Dict  # noqa: F401
+    from typing import Generator, List, Tuple, Dict, Callable  # noqa: F401
 
 
 class CaresResolver(Resolver):
@@ -66,10 +67,27 @@ class CaresResolver(Resolver):
         if is_valid_ip(host):
             addresses = [host]
         else:
-            # gethostbyname doesn't take callback as a kwarg
+            # getaddrinfo takes callback as keyword argument
             fut = Future()  # type: Future[Tuple[Any, Any]]
-            self.channel.gethostbyname(
-                host, family, lambda result, error: fut.set_result((result, error))
+
+            def addrinfo_callback(result: Any, error: int) -> None:
+                if error:
+                    fut.set_result((None, error))
+                else:
+                    # Convert AddrInfoResult to a format compatible with the old API
+                    # Extract addresses from result.nodes
+                    addr_result = type(
+                        "AddrResult", (), {"addresses": []}
+                    )()
+                    for node in result.nodes:
+                        addr = node.addr[0]
+                        if isinstance(addr, bytes):
+                            addr = addr.decode("ascii")
+                        addr_result.addresses.append(addr)
+                    fut.set_result((addr_result, error))
+
+            self.channel.getaddrinfo(
+                host, port, family=family, callback=addrinfo_callback
             )
             result, error = yield fut
             if error:
