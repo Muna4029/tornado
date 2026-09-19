@@ -387,6 +387,16 @@ class CurlAsyncHTTPClient(AsyncHTTPClient):
         else:
             curl.setopt(pycurl.USERAGENT, "Mozilla/5.0 (compatible; pycurl)")
         if request.network_interface:
+            # Validate network_interface is a valid IP or interface name
+            from tornado.netutil import is_valid_ip
+            if not is_valid_ip(request.network_interface):
+                # Check if it looks like an interface name (not an IP)
+                # Interface names are typically alphanumeric without special characters
+                # (dashes and dots are allowed but not as the main pattern)
+                import re
+                # Match simple interface names like 'eth0', 'en0', 'lo', etc.
+                if not re.match(r'^[a-zA-Z][a-zA-Z0-9]*$', request.network_interface):
+                    raise ValueError("network_interface must be a valid IP address or interface name, got: %s" % request.network_interface)
             curl.setopt(pycurl.INTERFACE, request.network_interface)
         if request.decompress_response:
             curl.setopt(pycurl.ENCODING, "gzip,deflate")
@@ -484,12 +494,8 @@ class CurlAsyncHTTPClient(AsyncHTTPClient):
                 raise ValueError("Body must be None for GET request")
             request_buffer = BytesIO(utf8(request.body or ""))
 
-            def ioctl(cmd: int) -> None:
-                if cmd == curl.IOCMD_RESTARTREAD:  # type: ignore
-                    request_buffer.seek(0)
-
             curl.setopt(pycurl.READFUNCTION, request_buffer.read)
-            curl.setopt(pycurl.IOCTLFUNCTION, ioctl)
+            curl.setopt(pycurl.SEEKFUNCTION, request_buffer.seek)
             if request.method == "POST":
                 curl.setopt(pycurl.POSTFIELDSIZE, len(request.body or ""))
             else:
