@@ -26,6 +26,7 @@ from io import BytesIO
 
 from tornado import httputil
 from tornado import ioloop
+from tornado import netutil
 
 from tornado.escape import utf8, native_str
 from tornado.httpclient import (
@@ -387,6 +388,11 @@ class CurlAsyncHTTPClient(AsyncHTTPClient):
         else:
             curl.setopt(pycurl.USERAGENT, "Mozilla/5.0 (compatible; pycurl)")
         if request.network_interface:
+            if not netutil.is_valid_ip(request.network_interface):
+                raise ValueError(
+                    "Unrecognized IPv4 or IPv6 address for network_interface, got %r"
+                    % (request.network_interface,)
+                )
             curl.setopt(pycurl.INTERFACE, request.network_interface)
         if request.decompress_response:
             curl.setopt(pycurl.ENCODING, "gzip,deflate")
