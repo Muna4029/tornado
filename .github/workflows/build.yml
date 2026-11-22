@@ -17,86 +17,133 @@ on:
   workflow_dispatch:
     # Allow this workflow to be run manually (pushing to testpypi instead of pypi)
 
+permissions:
+  contents: read
+
 env:
-  python-version: '3.9'
+  # [[[cog cog.outl(f"python-version: '3.{default_python_minor}'")]]]
+  python-version: '3.13'
+  # [[[end]]]
 
 jobs:
   build_sdist:
     name: Build sdist
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
         name: Install Python
         with:
           python-version: ${{ env.python-version }}
 
+      - name: Install dependencies
+        run: python -m pip install setuptools
       - name: Check metadata
         run: "python setup.py check"
       - name: Build sdist
         run: "python setup.py sdist && ls -l dist"
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v7
         with:
+          name: artifacts-sdist
           path: ./dist/tornado-*.tar.gz
 
   build_wheels:
-    name: Build wheels on ${{ matrix.os }}
+    name: Build wheels on ${{ matrix.os }}${{ matrix.name_suffix || '' }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-2022, macos-12]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, windows-2025, windows-11-arm, macos-15]
+        emulated: [false]
+        include:
+          - os: ubuntu-24.04
+            emulated: true
+            arch: "riscv64"
+            name_suffix: "-riscv64"
+          - os: ubuntu-24.04
+            emulated: true
+            arch: "ppc64le"
+            name_suffix: "-ppc64le"
+          - os: ubuntu-24.04
+            emulated: true
+            arch: "s390x"
+            name_suffix: "-s390x"
 
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
         name: Install Python
         with:
           python-version: ${{ env.python-version }}
+
       - name: Set up QEMU
-        if: runner.os == 'Linux'
-        uses: docker/setup-qemu-action@v2
+        if: matrix.emulated
+        uses: docker/setup-qemu-action@v4
         with:
-          platforms: all
+          platforms: ${{ matrix.arch }}
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.12.1
+        uses: pypa/cibuildwheel@v4.2.1
+        env:
+          CIBW_ARCHS: ${{ matrix.emulated && matrix.arch || '' }}
+          # Increase timeouts for emulated archs
+          CIBW_ENVIRONMENT: ${{ matrix.emulated && 'ASYNC_TEST_TIMEOUT=30 EMULATION=1' || '' }}
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v7
         with:
+          name: artifacts-${{ matrix.os }}${{ matrix.name_suffix || '' }}
           path: ./wheelhouse/*.whl
 
   upload_pypi_test:
     name: Upload to PyPI (test)
     needs: [build_wheels, build_sdist]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     if: github.repository == 'tornadoweb/tornado' && github.event_name == 'workflow_dispatch'
+    permissions:
+      # This permission is required for pypi's "trusted publisher" feature
+      id-token: write
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/tornado/
     steps:
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v7
         with:
-          name: artifact
+          pattern: artifacts-*
           path: dist
+          merge-multiple: true
 
-      - uses: pypa/gh-action-pypi-publish@v1.5.0
+      - uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          user: __token__
-          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
-          repository_url: https://test.pypi.org/legacy/
-          skip_existing: true
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
 
   upload_pypi:
     name: Upload to PyPI (prod)
     needs: [build_wheels, build_sdist]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     if: github.repository == 'tornadoweb/tornado' && github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    permissions:
+      # This permission is required for pypi's "trusted publisher" feature
+      id-token: write
+    environment:
+      # The pypi environment is configured to require approval before a job starts, so
+      # the build will stop here until the final release is approved by a maintainer.
+      name: pypi
+      url: https://pypi.org/project/tornado/
     steps:
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v7
         with:
-          name: artifact
+          pattern: artifacts-*
           path: dist
+          merge-multiple: true
 
-      - uses: pypa/gh-action-pypi-publish@v1.5.0
-        with:
-          user: __token__
-          password: ${{ secrets.PYPI_API_TOKEN }}
+      - uses: pypa/gh-action-pypi-publish@release/v1
