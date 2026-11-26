@@ -164,7 +164,13 @@ def main():
     define("locale", type=str, default=None, callback=set_locale)
 
     log_counter = LogCounter()
-    add_parse_callback(lambda: logging.getLogger().handlers[0].addFilter(log_counter))
+    def _install_log_counter():
+        root = logging.getLogger()
+        # Ensure there is a handler to attach the filter to; use current stderr
+        if not root.handlers:
+            root.addHandler(logging.StreamHandler(sys.stderr))
+        root.handlers[0].addFilter(log_counter)
+    add_parse_callback(_install_log_counter)
 
     # Certain errors (especially "unclosed resource" errors raised in
     # destructors) go directly to stderr instead of logging. Count
@@ -184,10 +190,12 @@ def main():
     # detail.  http://bugs.python.org/issue15626
     kwargs["warnings"] = False
 
-    kwargs["testRunner"] = test_runner_factory(orig_stderr)
+    kwargs["testRunner"] = test_runner_factory(sys.stderr)
     try:
         tornado.testing.main(**kwargs)
     finally:
+        # Restore original stderr before final logging and exit handling
+        sys.stderr = orig_stderr  # type: ignore
         # The tests should run clean; consider it a failure if they
         # logged anything at info level or above.
         if (

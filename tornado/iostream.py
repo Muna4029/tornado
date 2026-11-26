@@ -447,19 +447,34 @@ class BaseIOStream(object):
         # First copy data already in read buffer
         available_bytes = self._read_buffer_size
         n = len(buf)
+        # Track remaining bytes in the original buffer after copying
         if available_bytes >= n:
             buf[:] = memoryview(self._read_buffer)[:n]
+            # remove the bytes we consumed from the original buffer
             del self._read_buffer[:n]
+            # save any remaining original buffer for later
             self._after_user_read_buffer = self._read_buffer
+            remaining = available_bytes - n
         elif available_bytes > 0:
-            buf[:available_bytes] = memoryview(self._read_buffer)[:]
+            # copy whatever is available and remove it from the original
+            buf[:available_bytes] = memoryview(self._read_buffer)[:available_bytes]
+            del self._read_buffer[:available_bytes]
+            # save any remaining original buffer for later (may be empty)
+            self._after_user_read_buffer = self._read_buffer
+            remaining = 0
+        else:
+            # nothing available
+            self._after_user_read_buffer = None
+            remaining = 0
 
         # Set up the supplied buffer as our temporary read buffer.
         # The original (if it had any data remaining) has been
         # saved for later.
         self._user_read_buffer = True
         self._read_buffer = buf
-        self._read_buffer_size = available_bytes
+        # the read buffer size should reflect the bytes *already* in the
+        # original buffer that remain available for later reads
+        self._read_buffer_size = remaining
         self._read_bytes = n
         self._read_partial = partial
 
@@ -1101,7 +1116,7 @@ class IOStream(BaseIOStream):
         super().__init__(*args, **kwargs)
 
     def fileno(self) -> Union[int, ioloop._Selectable]:
-        return self.socket
+        return self.socket.fileno()
 
     def close_fd(self) -> None:
         self.socket.close()
@@ -1188,9 +1203,15 @@ class IOStream(BaseIOStream):
             # returned immediately when attempting to connect to
             # localhost, so handle them the same way as an error
             # reported later in _handle_connect.
-            if future is None:
-                gen_log.warning("Connect error on fd %s: %s", self.socket.fileno(), e)
+            gen_log.warning("Connect error on fd %s: %s", self.socket.fileno(), e)
+            # Ensure we close the stream and set the exception on the
+            # future so callers don't hang waiting for a result.
             self.close(exc_info=e)
+            try:
+                future.set_exception(e)
+            except Exception:
+                # If the future is already done for some reason, ignore.
+                pass
             return future
         self._add_io_state(self.io_loop.WRITE)
         return future
